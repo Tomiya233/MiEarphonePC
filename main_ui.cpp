@@ -1015,10 +1015,14 @@ private:
         worker_.post([this, auto_conn_after] {
             auto list = enumerate_paired_devices();
             std::string pick_mac;
+            std::string fallback_earphone_mac;
             {
                 std::lock_guard<std::mutex> lk(data_mtx_);
                 devices_ = list;
                 for (const auto& d : list) {
+                    if (d.is_earphone_hint && fallback_earphone_mac.empty()) {
+                        fallback_earphone_mac = d.mac;
+                    }
                     if (d.system_connected && d.is_earphone_hint) {
                         pick_mac = d.mac;
                         break;
@@ -1027,7 +1031,7 @@ private:
             }
             if (hwnd_) PostMessageW(hwnd_, WM_APP_DEVICES, 0, 0);
             if (auto_conn_after && !session_.is_connected()) {
-                std::string target = !pick_mac.empty() ? pick_mac : cfg_.last_mac;
+                std::string target = !pick_mac.empty() ? pick_mac : (!cfg_.last_mac.empty() ? cfg_.last_mac : fallback_earphone_mac);
                 if (!target.empty()) {
                     connect_worker_impl(target, true);
                 }
@@ -2903,11 +2907,12 @@ private:
                     invalidate();
                 } else if (wp == TIMER_AUTORECONNECT) {
                     if (!session_.is_connected() && !busy_ && cfg_.auto_reconnect && !manual_disconnected_) {
-                        worker_.post([this] {
+                        std::string watch_mac = mac_input_;
+                        worker_.post([this, watch_mac] {
                             if (session_.is_connected() || busy_ || is_xiaomi_manager_running()) return;
                             auto list = enumerate_paired_devices();
                             for (const auto& d : list) {
-                                if (d.system_connected && (_stricmp(d.mac.c_str(), mac_input_.c_str()) == 0 || d.is_earphone_hint)) {
+                                if (d.system_connected && ((!watch_mac.empty() && _stricmp(d.mac.c_str(), watch_mac.c_str()) == 0) || d.is_earphone_hint)) {
                                     connect_worker_impl(d.mac, true);
                                     return;
                                 }
@@ -2928,6 +2933,15 @@ private:
                 return 0;
 
             case WM_APP_DEVICES:
+                if (mac_input_.empty()) {
+                    std::lock_guard<std::mutex> lk(data_mtx_);
+                    for (const auto& d : devices_) {
+                        if (d.is_earphone_hint) {
+                            mac_input_ = d.mac;
+                            if (d.system_connected) break;
+                        }
+                    }
+                }
                 invalidate();
                 return 0;
 

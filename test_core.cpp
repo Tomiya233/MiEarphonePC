@@ -97,12 +97,21 @@ int main(int argc, char** argv) {
             std::printf("  - %s [%s] connected=%d hint=%d\n",
                         d.name.c_str(), d.mac.c_str(), d.system_connected, d.is_earphone_hint);
         }
+        std::string target_mac = (argc > 2) ? argv[2] : "";
+        for (const auto& d : devs) {
+            if (target_mac.empty() && d.is_earphone_hint) {
+                target_mac = d.mac;
+                if (d.system_connected) break;
+            }
+        }
+        assert(!target_mac.empty() && "No paired earphone found; pass MAC as argv[2]");
+
         BtSession sess;
         sess.set_callbacks(
             [](const std::string& l) { std::printf("  %s\n", l.c_str()); },
             nullptr, nullptr);
         int wsa = 0;
-        bool ok = sess.connect_and_auth("00:BB:43:7B:CD:0B", 6000, &wsa);
+        bool ok = sess.connect_and_auth(target_mac, 6000, &wsa);
         assert(ok && "Live connect_and_auth failed");
 
         auto orig = sess.snapshot();

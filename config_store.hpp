@@ -8,7 +8,7 @@
 namespace miearphone {
 
 struct AppConfig {
-    std::string last_mac = "00:BB:43:7B:CD:0B";
+    std::string last_mac;
     bool close_to_tray = true;
     bool auto_connect = true;
     bool auto_reconnect = true;
