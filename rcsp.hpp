@@ -202,6 +202,24 @@ inline size_t raw_auth_packet_len(const std::vector<uint8_t>& v) {
 // Builds an unframed auth packet: [tag][body16].
 std::vector<uint8_t> make_raw_auth_packet(uint8_t tag, const uint8_t body[16]);
 
+// How a received raw packet should be interpreted by the auth state machine.
+enum class RawAuthVerdict {
+    Ignore,       // unrelated / malformed
+    ProvedKey,    // [0x01][our_enc]  -> device knows the shared key
+    Challenge,    // [0x00][rnd16]    -> answer with [0x01][auth_response(rnd)]
+    PassToken     // [0x02]'pass'     -> device accepts without challenge
+};
+
+// Judges one raw packet. On Challenge, out_challenge receives the 16-byte nonce.
+RawAuthVerdict judge_raw_auth_packet(const uint8_t* pkt, size_t len,
+                                     const uint8_t our_enc[16],
+                                     uint8_t out_challenge[16]);
+inline RawAuthVerdict judge_raw_auth_packet(const std::vector<uint8_t>& pkt,
+                                            const uint8_t our_enc[16],
+                                            uint8_t out_challenge[16]) {
+    return judge_raw_auth_packet(pkt.data(), pkt.size(), our_enc, out_challenge);
+}
+
 // ---------------------------------------------------------------------------
 // Per-model profile table, rebuilt from APK 1.39.0 DeviceVidPidTypeUtilsKt
 // (all PID predicates are decimal there; these are the exact hex equivalents).

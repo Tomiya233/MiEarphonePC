@@ -149,7 +149,47 @@ int main(int argc, char** argv) {
         std::printf("[PASS] Channel / auth-mode naming\n");
     }
 
-    // 9. SPP service records must reproduce the APK UUID literals exactly,
+    // 9. Raw-stream handshake judging (offline simulation of the state machine)
+    {
+        uint8_t rnd[16];
+        for (int i = 0; i < 16; ++i) rnd[i] = static_cast<uint8_t>(0x40 + i);
+        auto our_enc = auth_response(rnd);
+        uint8_t chal[16] = {0};
+
+        // Device echoes our ciphertext -> it holds the shared key
+        auto echo = make_raw_auth_packet(0x01, our_enc.data());
+        assert(judge_raw_auth_packet(echo, our_enc.data(), chal) == RawAuthVerdict::ProvedKey);
+
+        // Echo with a wrong body must not be accepted
+        std::array<uint8_t, 16> wrong = our_enc;
+        wrong[15] ^= 0xFF;
+        auto bad_echo = make_raw_auth_packet(0x01, wrong.data());
+        assert(judge_raw_auth_packet(bad_echo, our_enc.data(), chal) == RawAuthVerdict::Ignore);
+
+        // Device issues its own nonce -> we capture it and answer
+        uint8_t devrnd[16];
+        for (int i = 0; i < 16; ++i) devrnd[i] = static_cast<uint8_t>(0xA0 + i);
+        auto devchal = make_raw_auth_packet(0x00, devrnd);
+        assert(judge_raw_auth_packet(devchal, our_enc.data(), chal) == RawAuthVerdict::Challenge);
+        assert(std::memcmp(chal, devrnd, 16) == 0);
+
+        // Our answer to that challenge is [0x01][auth_response(devrnd)]
+        auto answer = auth_response(devrnd);
+        auto answer_pkt = make_raw_auth_packet(0x01, answer.data());
+        assert(answer_pkt.size() == 17 && answer_pkt[0] == 0x01);
+        assert(std::memcmp(answer_pkt.data() + 1, answer.data(), 16) == 0);
+
+        // Accept token
+        std::vector<uint8_t> pass = {0x02, 'p', 'a', 's', 's'};
+        assert(judge_raw_auth_packet(pass, our_enc.data(), chal) == RawAuthVerdict::PassToken);
+
+        // Framed RCSP data is never raw auth
+        auto framed = build_command(CMD_GET_TARGET_INFO, {0xFF, 0xFF, 0xFF, 0xFF}, 0, APP_AUTH);
+        assert(judge_raw_auth_packet(framed, our_enc.data(), chal) == RawAuthVerdict::Ignore);
+        std::printf("[PASS] Raw-stream handshake judging (echo / challenge / pass / framed)\n");
+    }
+
+    // 10. SPP service records must reproduce the APK UUID literals exactly,
     //    in the APK's probe order, with the auth mode each one implies.
     {
         auto cat = spp_service_catalog();

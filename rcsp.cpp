@@ -1,6 +1,7 @@
 #include "rcsp.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace miearphone {
 
@@ -453,6 +454,35 @@ std::vector<uint8_t> make_raw_auth_packet(uint8_t tag, const uint8_t body[16]) {
     out.push_back(tag);
     if (body) out.insert(out.end(), body, body + 16);
     return out;
+}
+
+RawAuthVerdict judge_raw_auth_packet(const uint8_t* pkt, size_t len,
+                                     const uint8_t our_enc[16],
+                                     uint8_t out_challenge[16]) {
+    if (out_challenge) std::memset(out_challenge, 0, 16);
+    if (!pkt || len == 0) return RawAuthVerdict::Ignore;
+
+    // 5-byte accept token: {0x02, 'p', 'a', 's', 's'}
+    if (len >= 5 && pkt[0] == 0x02 &&
+        pkt[1] == 'p' && pkt[2] == 'a' && pkt[3] == 's' && pkt[4] == 's') {
+        return RawAuthVerdict::PassToken;
+    }
+
+    if (len != 17) return RawAuthVerdict::Ignore;
+
+    if (pkt[0] == 0x01) {
+        // Device encrypted our challenge: proves it holds the same key.
+        if (our_enc && std::memcmp(pkt + 1, our_enc, 16) == 0) {
+            return RawAuthVerdict::ProvedKey;
+        }
+        return RawAuthVerdict::Ignore;
+    }
+    if (pkt[0] == 0x00) {
+        // Device issueing its own nonce; we must answer it.
+        if (out_challenge) std::memcpy(out_challenge, pkt + 1, 16);
+        return RawAuthVerdict::Challenge;
+    }
+    return RawAuthVerdict::Ignore;
 }
 
 const char* vendor_display_name(uint16_t vid) {

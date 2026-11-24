@@ -861,15 +861,24 @@ bool BtSession::authenticate_raw_stream() {
     bool device_challenged = false;
     std::array<uint8_t, 16> dev_rnd{};
 
-    if (pkt->size() == 17 && (*pkt)[0] == 0x01) {
-        device_proved_key = (std::memcmp(pkt->data() + 1, raw_challenge_enc_.data(), 16) == 0);
-        emit_log(std::string("   设备回显加密挑战: ") + (device_proved_key ? "一致 ✓" : "不一致 ✗"));
-    } else if (pkt->size() == 17 && (*pkt)[0] == 0x00) {
-        device_challenged = true;
-        std::memcpy(dev_rnd.data(), pkt->data() + 1, 16);
-    } else if (pkt->size() == 5 && (*pkt)[0] == 0x02) {
-        emit_log("   设备回送 pass 令牌 → 视为认证通过");
-        device_proved_key = true;
+    {
+        auto verdict = judge_raw_auth_packet(*pkt, raw_challenge_enc_.data(), dev_rnd.data());
+        switch (verdict) {
+            case RawAuthVerdict::ProvedKey:
+                device_proved_key = true;
+                emit_log("   设备回显加密挑战: 一致 ✓");
+                break;
+            case RawAuthVerdict::Challenge:
+                device_challenged = true;
+                emit_log("   收到设备挑战 [0x00] → 准备应答");
+                break;
+            case RawAuthVerdict::PassToken:
+                device_proved_key = true;
+                emit_log("   设备回送 pass 令牌 → 视为认证通过");
+                break;
+            default:
+                break;
+        }
     }
 
     // Answer a device challenge at most twice (device may challenge immediately).
@@ -887,19 +896,20 @@ bool BtSession::authenticate_raw_stream() {
         }
         auto next = recv_raw(round == 0 ? 2000 : 1200);
         if (!next) break;
-        if (next->size() == 17 && (*next)[0] == 0x00) {
-            device_challenged = true;
-            std::memcpy(dev_rnd.data(), next->data() + 1, 16);
-            continue;
-        }
-        if (next->size() == 17 && (*next)[0] == 0x01) {
-            device_proved_key = device_proved_key ||
-                                (std::memcmp(next->data() + 1, raw_challenge_enc_.data(), 16) == 0);
-            continue;
-        }
-        if (next->size() == 5 && (*next)[0] == 0x02) {
-            device_proved_key = true;
-            break;
+        {
+            auto verdict = judge_raw_auth_packet(*next, raw_challenge_enc_.data(), dev_rnd.data());
+            if (verdict == RawAuthVerdict::Challenge) {
+                device_challenged = true;
+                continue;
+            }
+            if (verdict == RawAuthVerdict::ProvedKey) {
+                device_proved_key = true;
+                continue;
+            }
+            if (verdict == RawAuthVerdict::PassToken) {
+                device_proved_key = true;
+                break;
+            }
         }
         // Framed data on a raw channel means the device already switched to
         // command mode; treat that as success and let the frame path take over.
