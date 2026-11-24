@@ -412,4 +412,163 @@ const char* config_name(uint16_t cfg_id) {
     }
 }
 
+const char* channel_kind_name(ChannelKind k) {
+    switch (k) {
+        case ChannelKind::MiuiSppFd2d: return "MIUI SPP (FD2D)";
+        case ChannelKind::XiaoAiSpp: return "XiaoAi SPP (1101/008584D01810)";
+        case ChannelKind::StandardSpp: return "Standard SPP (1101)";
+        default: return "Unknown";
+    }
+}
+
+const char* auth_mode_name(AuthMode m) {
+    switch (m) {
+        case AuthMode::Framed: return "Framed RCSP";
+        case AuthMode::RawStream: return "Raw stream";
+        default: return "None";
+    }
+}
+
+size_t raw_auth_packet_len(const uint8_t* buf, size_t len) {
+    if (!buf || len == 0) return 0;
+    // A framed RCSP packet is never a raw auth packet (APK BluetoothAuth.k early-outs on FE DC BA ... EF)
+    if (len >= 3 && buf[0] == FRAME_HEAD[0] && buf[1] == FRAME_HEAD[1] && buf[2] == FRAME_HEAD[2]) {
+        return 0;
+    }
+    // 17-byte challenge / response: [0x00 | 0x01][16B body]
+    if (len >= 17 && (buf[0] == 0x00 || buf[0] == 0x01)) {
+        return 17;
+    }
+    // 5-byte pass token
+    if (len >= 5 && buf[0] == 0x02 &&
+        buf[1] == 'p' && buf[2] == 'a' && buf[3] == 's' && buf[4] == 's') {
+        return 5;
+    }
+    return 0;
+}
+
+std::vector<uint8_t> make_raw_auth_packet(uint8_t tag, const uint8_t body[16]) {
+    std::vector<uint8_t> out;
+    out.reserve(17);
+    out.push_back(tag);
+    if (body) out.insert(out.end(), body, body + 16);
+    return out;
+}
+
+const char* vendor_display_name(uint16_t vid) {
+    switch (vid) {
+        case 0x2717: return "Xiaomi";
+        case 0x5A4D: return "ZMI";
+        case 0x1915: return "Nordic/Airoha";
+        default: return "Unknown";
+    }
+}
+
+// Rebuilt from APK 1.39.0 com.mi.earphone.bluetoothsdk.util.DeviceVidPidTypeUtilsKt.
+// Every predicate there compares decimal ints; the values below are the exact
+// hex equivalents, so a live GET_TARGET_INFO VID/PID matches directly.
+static const DeviceProfile kKnownProfiles[] = {
+    // ---- Xiaomi-branded models (小米) ----
+    // FlipBuds Pro (J77S)
+    {0x2717, 0x5019, "J77S", "小米 FlipBuds Pro", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x5036, "J77S", "小米 FlipBuds Pro", "Xiaomi", 3, 3, true, true, false},
+    // Xiaomi Buds 3 Pro (K73 / K73a)
+    {0x2717, 0x5025, "K73", "Xiaomi Buds 3 Pro", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x502D, "K73a", "Xiaomi Buds 3 Pro", "Xiaomi", 3, 3, true, true, false},
+    // Xiaomi Buds 3 (K75 / K75s 星球大战版)
+    {0x2717, 0x5026, "K75", "Xiaomi Buds 3", "Xiaomi", 3, 3, false, true, false},
+    {0x2717, 0x502B, "K75", "Xiaomi Buds 3", "Xiaomi", 3, 3, false, true, false},
+    {0x2717, 0x505A, "K75s", "Xiaomi Buds 3 (星球大战版)", "Xiaomi", 3, 3, false, true, false},
+    // Xiaomi Buds 4 Pro (L76, ZMI VID)
+    {0x5A4D, 0xEA0E, "L76", "Xiaomi Buds 4 Pro", "Xiaomi", 3, 3, true, true, false},
+    {0x5A4D, 0xEA0F, "L76", "Xiaomi Buds 4 Pro", "Xiaomi", 3, 3, true, true, false},
+    {0x5A4D, 0xEA10, "L76", "Xiaomi Buds 4 Pro", "Xiaomi", 3, 3, true, true, false},
+    // Xiaomi Buds 4 (M75A, 半入耳自适应降噪)
+    {0x2717, 0x5044, "M75A", "Xiaomi Buds 4", "Xiaomi", 1, 1, true, true, false},
+    {0x2717, 0x5045, "M75A", "Xiaomi Buds 4", "Xiaomi", 1, 1, true, true, false},
+    // Xiaomi 开放式耳机 (N79 / N79A / N79B / N79S)
+    {0x2717, 0x5088, "N79", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x5089, "N79", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x508A, "N79A", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x508B, "N79A", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x508C, "N79A", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x508D, "N79A", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x509A, "N79B", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x509B, "N79B", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    {0x2717, 0x509C, "N79S", "Xiaomi 开放式耳机", "Xiaomi", 0, 0, false, true, false},
+    // Xiaomi Buds 5 Pro (O71 / O71 WiFi / O71 BT)
+    {0x2717, 0x50AB, "O71", "Xiaomi Buds 5 Pro", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50AC, "O71", "Xiaomi Buds 5 Pro (WiFi版)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50AD, "O71", "Xiaomi Buds 5 Pro", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50B4, "O71", "Xiaomi Buds 5 Pro (BT版)", "Xiaomi", 3, 3, true, true, false},
+    // Xiaomi Buds 5 (O74)
+    {0x2717, 0x50B8, "O74", "Xiaomi Buds 5", "Xiaomi", 1, 1, true, true, false},
+    {0x2717, 0x50D7, "O74", "Xiaomi Buds 5", "Xiaomi", 1, 1, true, true, false},
+    // O70C / O73 / P75 / P76 / P79 / Q74 (Xiaomi 迭代机型)
+    {0x2717, 0x50F0, "O70C", "Xiaomi 耳机 (O70C)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50FB, "O70C", "Xiaomi 耳机 (O70C)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50B5, "O73", "Xiaomi 耳机 (O73)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50EA, "P75", "Xiaomi 耳机 (P75)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50EB, "P75", "Xiaomi 耳机 (P75)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50E3, "P76", "Xiaomi 耳机 (P76)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50E5, "P76", "Xiaomi 耳机 (P76)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50F4, "P76Bose", "Xiaomi 耳机 (P76 Bose 联名)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50E1, "P79", "Xiaomi 耳机 (P79)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50E2, "P79", "Xiaomi 耳机 (P79)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x511E, "Q74C", "Xiaomi 耳机 (Q74C)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x511F, "Q74C", "Xiaomi 耳机 (Q74C)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50DB, "Q74u", "Xiaomi 耳机 (Q74u)", "Xiaomi", 3, 3, true, true, false},
+    {0x2717, 0x50DC, "Q74u", "Xiaomi 耳机 (Q74u)", "Xiaomi", 3, 3, true, true, false},
+
+    // ---- Redmi-branded models ----
+    {0x2717, 0x5035, "L71", "Redmi Buds 4", "Redmi", 2, 2, false, true, false},
+    {0x2717, 0x503B, "L71", "Redmi Buds 4", "Redmi", 2, 2, false, true, false},
+    {0x2717, 0x5034, "L77", "Redmi Buds 4 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x5037, "L77", "Redmi Buds 4 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x5038, "L77", "Redmi Buds 4 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x505D, "L77s", "Redmi Buds 4 Pro (哈利波特版)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x505F, "M79A", "Redmi Buds 4 活力版", "Redmi", 0, 0, false, false, false},
+    {0x2717, 0x5060, "M79A", "Redmi Buds 4 青春版", "Redmi", 0, 0, false, false, false},
+    {0x2717, 0x5061, "M79A", "Redmi Buds 4 活力版", "Redmi", 0, 0, false, false, false},
+    {0x2717, 0x5062, "M79A", "Redmi Buds 4 活力版", "Redmi", 0, 0, false, false, false},
+    {0x2717, 0x5069, "M79A", "Redmi Buds 4 活力版", "Redmi", 0, 0, false, false, false},
+    {0x2717, 0x508E, "M79I", "Redmi Buds 4 (M79I)", "Redmi", 0, 0, false, false, false},
+    {0x2717, 0x507F, "N74A", "Redmi Buds 5A", "Redmi", 1, 1, false, false, false},
+    {0x2717, 0x5080, "N74A", "Redmi Buds 5A", "Redmi", 1, 1, false, false, false},
+    {0x2717, 0x5081, "N75", "Redmi Buds 5", "Redmi", 3, 3, false, true, false},
+    {0x2717, 0x5082, "N75", "Redmi Buds 5", "Redmi", 3, 3, false, true, false},
+    {0x2717, 0x506C, "N76", "Redmi Buds 5 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x506D, "N76", "Redmi Buds 5 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x506E, "N76GIP", "Redmi Buds 5 Pro (IP联名版)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x506F, "N76G", "Redmi Buds 5 Pro (电竞版)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x506A, "N77", "Redmi 耳机 (N77)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x5075, "N77", "Redmi 耳机 (N77)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x5087, "N77", "Redmi 耳机 (N77)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x506B, "N77Ip", "Redmi 耳机 (N77 IP联名版)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x5095, "N77S", "Redmi 耳机 (N77S)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x509D, "O76", "Redmi Buds 6 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x509E, "O76", "Redmi Buds 6 Pro", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x50AF, "O76G", "Redmi Buds 6 Pro (电竞版)", "Redmi", 3, 3, true, true, false},
+    {0x2717, 0x509F, "O77", "Redmi Buds 6", "Redmi", 2, 2, false, true, false},
+    {0x2717, 0x50A0, "O77", "Redmi Buds 6", "Redmi", 2, 2, false, true, false},
+    {0x2717, 0x50A7, "O77", "Redmi Buds 6", "Redmi", 2, 2, false, true, false},
+    {0x2717, 0x50B9, "O77S", "REDMI Buds 7S", "Redmi", 2, 2, false, true, false},
+
+    // ---- ZMI legacy (OneMore / raw stream auth) ----
+    {0x5A4D, 0xEA01, "TW100", "ZMI PurPods Pro", "ZMI", 1, 1, false, false, true},
+    {0x5A4D, 0xEA02, "TW101", "ZMI PurPods Pro", "ZMI", 1, 1, false, false, true},
+    {0x5A4D, 0xAC01, "NZBT01", "ZMI PurPods", "ZMI", 0, 0, false, false, true},
+    {0x5A4D, 0xBA02, "B508", "ZMI 蓝牙耳机 B508", "ZMI", 0, 0, false, false, true},
+    {0x5A4D, 0xBA03, "B608", "ZMI 蓝牙耳机 B608", "ZMI", 0, 0, false, false, true},
+    {0x5A4D, 0xBA04, "WBS02", "ZMI 蓝牙耳机 WBS02", "ZMI", 0, 0, false, false, true},
+};
+
+std::optional<DeviceProfile> find_device_profile(uint16_t vid, uint16_t pid) {
+    if (vid == 0 && pid == 0) return std::nullopt;
+    for (const auto& p : kKnownProfiles) {
+        if (p.vid == vid && p.pid == pid) return p;
+    }
+    return std::nullopt;
+}
+
 } // namespace miearphone

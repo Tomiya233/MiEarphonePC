@@ -165,6 +165,63 @@ inline std::string to_hex(const std::vector<uint8_t>& v, bool spaced = true) {
     return to_hex(v.data(), v.size(), spaced);
 }
 
+// ---------------------------------------------------------------------------
+// Transport channel selection
+//
+// Official APK connect order (ua/i.java ConnectSppUUID.run):
+//   1) 0000FD2D-... (MIUI SPP)          -> success sets auth-with-command = true
+//   2) 00001101-...-008584D01810 (XiaoAi SPP)
+//   3) 00001101-...-00805F9B34FB (Standard SPP)
+// Channels 2/3 keep auth-with-command = false, i.e. raw stream authentication.
+// ---------------------------------------------------------------------------
+enum class ChannelKind {
+    Unknown,
+    MiuiSppFd2d,   // 0000FD2D: framed RCSP auth
+    XiaoAiSpp,     // 1101 + node 008584D01810: raw stream auth
+    StandardSpp    // 1101 + node 00805F9B34FB: raw stream auth
+};
+
+// Wire encoding of the authentication exchange on the active channel.
+enum class AuthMode {
+    None,       // not decided yet
+    Framed,     // RCSP frames: FE DC BA C1 50 ... EF
+    RawStream   // unframed 17-byte [tag, body16] packets (APK BluetoothAuth.k)
+};
+
+const char* channel_kind_name(ChannelKind k);
+const char* auth_mode_name(AuthMode m);
+
+// APK BluetoothAuth.k(): raw auth packet classifier.
+// Returns 17 for [tag:0x00|0x01][body:16B], 5 for [0x02,'p','a','s','s'], else 0.
+// RCSP frames always return 0 (they start with 0xFE).
+size_t raw_auth_packet_len(const uint8_t* buf, size_t len);
+inline size_t raw_auth_packet_len(const std::vector<uint8_t>& v) {
+    return raw_auth_packet_len(v.data(), v.size());
+}
+
+// Builds an unframed auth packet: [tag][body16].
+std::vector<uint8_t> make_raw_auth_packet(uint8_t tag, const uint8_t body[16]);
+
+// ---------------------------------------------------------------------------
+// Per-model profile table, rebuilt from APK 1.39.0 DeviceVidPidTypeUtilsKt
+// (all PID predicates are decimal there; these are the exact hex equivalents).
+// ---------------------------------------------------------------------------
+struct DeviceProfile {
+    uint16_t vid = 0;
+    uint16_t pid = 0;
+    const char* codename = "";
+    const char* market_name = "";
+    const char* brand = "";      // "Xiaomi" / "Redmi" / "ZMI"
+    uint8_t anc_gears = 3;       // 0 none, 1 single, 2 two, 3 three manual gears
+    uint8_t trans_gears = 3;
+    bool spatial = false;
+    bool multipoint = false;
+    bool raw_auth_likely = false; // no FD2D history -> expect raw stream auth
+};
+
+std::optional<DeviceProfile> find_device_profile(uint16_t vid, uint16_t pid);
+const char* vendor_display_name(uint16_t vid);
+
 // Frame codecs
 std::vector<uint8_t> build_command(uint8_t opcode,
                                    const std::vector<uint8_t>& payload,
