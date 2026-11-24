@@ -53,10 +53,18 @@ bool has_earphone_keyword(const std::string& name) {
     return false;
 }
 
-// Primary Airoha GATT-over-RFCOMM Service UUID: 0000FD2D-0000-1000-8000-00805F9B34FB
+// Primary MIUI SPP (Airoha GATT-over-RFCOMM) service UUID:
+// 0000FD2D-0000-1000-8000-00805F9B34FB. Connecting here means auth-with-command.
 constexpr GUID kServiceFd2d = {
     0x0000FD2D, 0x0000, 0x1000,
     {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}
+};
+
+// XiaoAi SPP record: 00001101-0000-1000-8000-008584D01810 (APK UUID_SPP_XIAOAI).
+// Fallback channels keep auth-with-command = false, i.e. raw stream auth.
+constexpr GUID kServiceXiaoAiSpp = {
+    0x00001101, 0x0000, 0x1000,
+    {0x80, 0x00, 0x00, 0x85, 0x84, 0xD0, 0x18, 0x10}
 };
 
 // Fallback Standard SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
@@ -261,12 +269,48 @@ bool BtSession::connect_and_auth(const std::string& mac, int connect_timeout_ms,
         return sock;
     };
 
-    emit_log(">>> RFCOMM 连接 " + norm_mac + " (FD2D)");
+    // Channel order mirrors the official APK (ua/i.java ConnectSppUUID.run):
+    //   FD2D (MIUI SPP)  -> framed RCSP auth
+    //   XiaoAi SPP       -> raw stream auth
+    //   Standard SPP     -> raw stream auth
+    // Trying only FD2D made Xiaomi-branded models fail: they expose no FD2D
+    // service and fall back to a channel whose auth is unframed.
+    struct ChannelAttempt {
+        const GUID* uuid;
+        ChannelKind kind;
+        AuthMode mode;
+        const char* label;
+    };
+    static const ChannelAttempt kAttempts[] = {
+        {&kServiceFd2d, ChannelKind::MiuiSppFd2d, AuthMode::Framed, "FD2D (MIUI SPP)"},
+        {&kServiceXiaoAiSpp, ChannelKind::XiaoAiSpp, AuthMode::RawStream, "1101 (XiaoAi SPP)"},
+        {&kServiceSpp, ChannelKind::StandardSpp, AuthMode::RawStream, "1101 (Standard SPP)"},
+    };
+
+    SOCKET s = INVALID_SOCKET;
     int last_err = 0;
-    SOCKET s = try_connect_uuid(kServiceFd2d, "FD2D", last_err);
-    if (s == INVALID_SOCKET && (last_err == 10049 || last_err == 10108)) {
-        emit_log("    FD2D 服务未注册，尝试标准 SPP (1101)...");
-        s = try_connect_uuid(kServiceSpp, "SPP", last_err);
+    channel_ = ChannelKind::Unknown;
+    auth_mode_ = AuthMode::None;
+
+    for (const auto& attempt : kAttempts) {
+        emit_log(">>> RFCOMM 连接 " + norm_mac + "  [" + attempt.label + "]");
+        int err = 0;
+        SOCKET candidate = try_connect_uuid(*attempt.uuid, attempt.label, err);
+        if (candidate != INVALID_SOCKET) {
+            s = candidate;
+            channel_ = attempt.kind;
+            auth_mode_ = attempt.mode;
+            last_err = 0;
+            break;
+        }
+        last_err = err;
+        // 10049/10108 = service not registered on the peer; other errors mean the
+        // link itself is down, so stop retrying further service records.
+        if (err != 10049 && err != 10108) {
+            emit_log("    " + std::string(attempt.label) + " 连接失败 WSA=" + std::to_string(err));
+            break;
+        }
+        emit_log("    " + std::string(attempt.label) + " 未注册，尝试下一个通道...");
     }
 
     if (s == INVALID_SOCKET) {
@@ -274,6 +318,8 @@ bool BtSession::connect_and_auth(const std::string& mac, int connect_timeout_ms,
         emit_log("[失败] 连接失败 WSA=" + std::to_string(last_err));
         return false;
     }
+    emit_log(std::string("通道: ") + channel_kind_name(channel_) +
+             " · 认证方式: " + auth_mode_name(auth_mode_));
 
     u_long nonblock = 0;
     ioctlsocket(s, FIONBIO, &nonblock);
@@ -288,6 +334,8 @@ bool BtSession::connect_and_auth(const std::string& mac, int connect_timeout_ms,
         state_.connected = true;
         state_.mac = norm_mac;
         state_.name = norm_mac;
+        state_.channel = channel_;
+        state_.auth_mode = auth_mode_;
     }
 
     {
@@ -296,6 +344,12 @@ bool BtSession::connect_and_auth(const std::string& mac, int connect_timeout_ms,
     }
     alive_.store(true);
     dev_challenged_.store(false);
+    {
+        std::lock_guard<std::mutex> lk(raw_mtx_);
+        raw_inbox_.clear();
+        raw_stage_ = 0;
+        raw_ok_ = false;
+    }
     drain_inbox();
 
     rx_thread_ = std::thread(&BtSession::rx_loop, this);
@@ -445,6 +499,39 @@ void BtSession::rx_loop() {
             return;
         }
         rx_buf.insert(rx_buf.end(), chunk, chunk + n);
+
+        // Demux: a legacy/raw-auth channel sends unframed 17/5-byte packets
+        // (APK BluetoothAuth.k), everything else is a framed RCSP packet.
+        while (!rx_buf.empty()) {
+            size_t raw_len = 0;
+            if (auth_mode_ == AuthMode::RawStream || !raw_ok_) {
+                raw_len = raw_auth_packet_len(rx_buf);
+            }
+            if (raw_len > 0 && rx_buf.size() >= raw_len) {
+                std::vector<uint8_t> pkt(rx_buf.begin(), rx_buf.begin() + static_cast<ptrdiff_t>(raw_len));
+                rx_buf.erase(rx_buf.begin(), rx_buf.begin() + static_cast<ptrdiff_t>(raw_len));
+                emit_log("← [raw] " + to_hex(pkt));
+                if (!handle_raw_auth_packet(pkt)) {
+                    emit_log("   [raw] 未匹配到认证状态机，丢弃");
+                }
+                continue;
+            }
+            // Raw packet still incomplete: wait for the rest.
+            if (raw_len > 0 && rx_buf.size() < raw_len) break;
+            if (!rx_buf.empty() && rx_buf[0] != FRAME_HEAD[0]) {
+                // Not a frame head and not a raw auth packet: resync.
+                auto it = std::find(rx_buf.begin(), rx_buf.end(), FRAME_HEAD[0]);
+                if (it == rx_buf.end()) {
+                    emit_log("   [丢弃] 无法识别的数据 " + to_hex(rx_buf));
+                    rx_buf.clear();
+                } else if (it != rx_buf.begin()) {
+                    rx_buf.erase(rx_buf.begin(), it);
+                }
+                continue;
+            }
+            break;
+        }
+
         auto frames = extract_frames(rx_buf);
         for (const auto& raw : frames) {
             auto parsed = parse_frame(raw);
@@ -603,6 +690,15 @@ void BtSession::apply_target_info_attrs(const std::map<uint8_t, std::vector<uint
     if (auto it = attrs.find(TARGET_ATTR_VID_PID); it != attrs.end() && it->second.size() >= 4) {
         state_.vid = static_cast<uint16_t>((it->second[0] << 8) | it->second[1]);
         state_.pid = static_cast<uint16_t>((it->second[2] << 8) | it->second[3]);
+        // Resolve brand/model so the UI can tell 小米 from 红米 and the log can
+        // show whether the model is in the adaptation table at all.
+        if (auto prof = find_device_profile(state_.vid, state_.pid)) {
+            state_.brand = prof->brand;
+            state_.model_name = prof->market_name;
+        } else {
+            state_.brand = vendor_display_name(state_.vid);
+            state_.model_name.clear();
+        }
     }
     if (auto it = attrs.find(TARGET_ATTR_QUANTITY); it != attrs.end() && !it->second.empty()) {
         BatteryUnit u = decode_battery_byte(it->second[0]);
@@ -628,14 +724,42 @@ void BtSession::apply_status_attrs(const std::map<uint8_t, std::vector<uint8_t>>
     // Official NoiseReductionView tracks CFG 11 (0xF3 / 0xF4) exclusively.
 }
 
+std::optional<DeviceProfile> BtSession::profile() const {
+    EarphoneSnapshot s = snapshot();
+    return find_device_profile(s.vid, s.pid);
+}
+
 bool BtSession::reauthenticate() {
+    // Pick the auth encoding the channel expects; if it fails, retry with the
+    // other one. Xiaomi-branded models answer only one of the two, and the
+    // channel -> encoding mapping is a heuristic (FD2D => framed) that some
+    // firmware violates.
+    AuthMode first = (auth_mode_ == AuthMode::RawStream) ? AuthMode::RawStream : AuthMode::Framed;
+    AuthMode second = (first == AuthMode::Framed) ? AuthMode::RawStream : AuthMode::Framed;
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        AuthMode mode = (attempt == 0) ? first : second;
+        if (mode == AuthMode::RawStream) {
+            if (authenticate_raw_stream()) return true;
+        } else {
+            if (authenticate_rcsp_cmd()) return true;
+        }
+        if (!alive_.load()) return false;
+        emit_log(std::string("   ") + auth_mode_name(mode) +
+                 " 认证未通过，改用 " + auth_mode_name((mode == AuthMode::Framed) ? AuthMode::RawStream : AuthMode::Framed) + " 重试...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    return false;
+}
+
+bool BtSession::authenticate_rcsp_cmd() {
     drain_inbox();
     dev_challenged_.store(false);
 
     uint8_t rnd[16];
     fill_random_16(rnd);
 
-    emit_log("=== RCSP 双向认证 ===");
+    emit_log("=== RCSP 帧式双向认证 ===");
     std::vector<uint8_t> req;
     req.reserve(17);
     req.push_back(0x01);
@@ -662,13 +786,145 @@ bool BtSession::reauthenticate() {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
 
+    auth_mode_ = AuthMode::Framed;
     {
         std::lock_guard<std::mutex> lk(state_mtx_);
         state_.authenticated = match;
+        state_.auth_mode = auth_mode_;
     }
     emit_state();
     emit_log(match ? "=== 认证通过 ✓ ===" : "=== 认证未通过 ===");
     return match;
+}
+
+// Raw (unframed) authentication, ported from APK BluetoothAuth.s()/k():
+//   stage 0 -> we push a 16B challenge, device echoes [0x01][enc16]
+//   stage 1 -> device pushes [0x00][rnd16]; we answer [0x01][enc16]
+//   stage 2 -> device confirms; auth stage becomes OK
+bool BtSession::authenticate_raw_stream() {
+    {
+        std::lock_guard<std::mutex> lk(raw_mtx_);
+        raw_inbox_.clear();
+        raw_stage_ = 0;
+        raw_ok_ = false;
+    }
+    drain_inbox();
+
+    emit_log("=== 裸流式认证 (raw stream) ===");
+
+    uint8_t rnd[16];
+    fill_random_16(rnd);
+    auto enc = auth_response(rnd);
+    {
+        std::lock_guard<std::mutex> lk(raw_mtx_);
+        std::memcpy(raw_challenge_.data(), rnd, 16);
+        std::memcpy(raw_challenge_enc_.data(), enc.data(), 16);
+        raw_stage_ = 1;
+    }
+
+    // Stage 0: send our challenge unframed.
+    if (!send_raw(std::vector<uint8_t>(rnd, rnd + 16))) return false;
+
+    auto recv_raw = [&](int timeout_ms) -> std::optional<std::vector<uint8_t>> {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        std::unique_lock<std::mutex> lk(raw_mtx_);
+        while (alive_.load()) {
+            if (!raw_inbox_.empty()) {
+                auto pkt = std::move(raw_inbox_.front());
+                raw_inbox_.pop_front();
+                return pkt;
+            }
+            if (raw_cv_.wait_until(lk, deadline) == std::cv_status::timeout) break;
+        }
+        return std::nullopt;
+    };
+
+    auto pkt = recv_raw(3000);
+    if (!pkt) {
+        emit_log("✗ 裸流认证: 设备未回应挑战");
+        return false;
+    }
+
+    bool device_proved_key = false;
+    bool device_challenged = false;
+    std::array<uint8_t, 16> dev_rnd{};
+
+    if (pkt->size() == 17 && (*pkt)[0] == 0x01) {
+        device_proved_key = (std::memcmp(pkt->data() + 1, raw_challenge_enc_.data(), 16) == 0);
+        emit_log(std::string("   设备回显加密挑战: ") + (device_proved_key ? "一致 ✓" : "不一致 ✗"));
+    } else if (pkt->size() == 17 && (*pkt)[0] == 0x00) {
+        device_challenged = true;
+        std::memcpy(dev_rnd.data(), pkt->data() + 1, 16);
+    } else if (pkt->size() == 5 && (*pkt)[0] == 0x02) {
+        emit_log("   设备回送 pass 令牌 → 视为认证通过");
+        device_proved_key = true;
+    }
+
+    // Answer a device challenge at most twice (device may challenge immediately).
+    for (int round = 0; round < 2; ++round) {
+        if (device_challenged) {
+            auto ans = auth_response(dev_rnd.data());
+            auto out = make_raw_auth_packet(0x01, ans.data());
+            emit_log("   → 应答设备挑战 " + to_hex(out));
+            if (!send_raw(out)) return false;
+            {
+                std::lock_guard<std::mutex> lk(raw_mtx_);
+                raw_stage_ = 2;
+            }
+            device_challenged = false;
+        }
+        auto next = recv_raw(round == 0 ? 2000 : 1200);
+        if (!next) break;
+        if (next->size() == 17 && (*next)[0] == 0x00) {
+            device_challenged = true;
+            std::memcpy(dev_rnd.data(), next->data() + 1, 16);
+            continue;
+        }
+        if (next->size() == 17 && (*next)[0] == 0x01) {
+            device_proved_key = device_proved_key ||
+                                (std::memcmp(next->data() + 1, raw_challenge_enc_.data(), 16) == 0);
+            continue;
+        }
+        if (next->size() == 5 && (*next)[0] == 0x02) {
+            device_proved_key = true;
+            break;
+        }
+        // Framed data on a raw channel means the device already switched to
+        // command mode; treat that as success and let the frame path take over.
+        if (!next->empty() && (*next)[0] == FRAME_HEAD[0]) {
+            emit_log("   收到 RCSP 帧 → 设备已切到命令模式");
+            device_proved_key = true;
+        }
+    }
+
+    // Raw channels do not carry an explicit ACK for our final answer, so the
+    // state of the exchange is the best signal available.
+    bool ok = device_proved_key;
+    {
+        std::lock_guard<std::mutex> lk(raw_mtx_);
+        raw_ok_ = ok;
+        if (ok) raw_stage_ = 3;
+    }
+    auth_mode_ = AuthMode::RawStream;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        state_.authenticated = ok;
+        state_.auth_mode = auth_mode_;
+    }
+    emit_state();
+    emit_log(ok ? "=== 裸流认证通过 ✓ ===" : "=== 裸流认证未通过 ===");
+    return ok;
+}
+
+bool BtSession::handle_raw_auth_packet(const std::vector<uint8_t>& pkt) {
+    if (pkt.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lk(raw_mtx_);
+        if (raw_inbox_.size() > 32) raw_inbox_.pop_front();
+        if (raw_inbox_.empty() || raw_inbox_.back() != pkt) raw_inbox_.push_back(pkt);
+    }
+    raw_cv_.notify_all();
+    return true;
 }
 
 bool BtSession::refresh_battery() {

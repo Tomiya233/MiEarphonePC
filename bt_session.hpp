@@ -29,6 +29,12 @@ struct EarphoneSnapshot {
     uint16_t vid = 0;
     uint16_t pid = 0;
 
+    // Transport / model identification (APK ua/i.java channel order + vid/pid)
+    ChannelKind channel = ChannelKind::Unknown;
+    AuthMode auth_mode = AuthMode::None;
+    std::string brand;        // Xiaomi / Redmi / ZMI
+    std::string model_name;   // market name from the profile table, if known
+
     BatteryStatus battery;
 
     uint8_t anc_mode = ANC_MODE_NOISE;
@@ -75,6 +81,9 @@ public:
 
     bool is_connected() const { return alive_.load(); }
     EarphoneSnapshot snapshot() const;
+    ChannelKind channel_kind() const { return channel_; }
+    std::optional<DeviceProfile> profile() const;
+    AuthMode auth_mode() const { return auth_mode_; }
 
     // Synchronous protocol operations (safe to call from worker threads)
     bool refresh_all();
@@ -103,6 +112,11 @@ private:
     std::optional<RspFrame> wait_response(uint8_t opcode, int timeout_ms = 2500);
     void drain_inbox();
 
+    bool authenticate_rcsp_cmd();
+    bool authenticate_raw_stream();
+    // Feeds one unframed auth packet (17 or 5 bytes) through the state machine.
+    bool handle_raw_auth_packet(const std::vector<uint8_t>& pkt);
+
     bool set_config_sync(const CommonConfig& cfg, int timeout_ms = 2000);
     bool query_configs_sync(const std::vector<uint16_t>& ids, int timeout_ms = 2500);
 
@@ -129,6 +143,19 @@ private:
     std::deque<RspFrame> inbox_;
     std::atomic<uint64_t> report_seq_{0};
     std::atomic<bool> dev_challenged_{false};
+
+    // Transport channel actually established (drives the auth encoding).
+    ChannelKind channel_ = ChannelKind::Unknown;
+    AuthMode auth_mode_ = AuthMode::None;
+
+    // Raw stream auth state (APK BluetoothAuth.s / stages 0..3)
+    std::mutex raw_mtx_;
+    std::condition_variable raw_cv_;
+    std::deque<std::vector<uint8_t>> raw_inbox_;
+    std::array<uint8_t, 16> raw_challenge_{};
+    std::array<uint8_t, 16> raw_challenge_enc_{};
+    int raw_stage_ = 0;          // 0 idle, 1 challenged us, 2 we replied, 3 authenticated
+    bool raw_ok_ = false;
 
     std::thread rx_thread_;
 
