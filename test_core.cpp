@@ -23,6 +23,8 @@ static std::vector<uint8_t> from_hex(const char* s) {
 }
 
 int main(int argc, char** argv) {
+    // Keep logs visible even when a later assert aborts the process.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     // 1. Auth cipher 4/4 real captured pairs
     struct Pair { const char* rnd; const char* ans; };
     static const Pair kPairs[4] = {
@@ -147,6 +149,20 @@ int main(int argc, char** argv) {
         std::printf("[PASS] Channel / auth-mode naming\n");
     }
 
+    // 9. SPP service records must reproduce the APK UUID literals exactly,
+    //    in the APK's probe order, with the auth mode each one implies.
+    {
+        auto cat = spp_service_catalog();
+        assert(cat.size() == 3);
+        assert(spp_service_uuid_text(cat[0]) == "0000fd2d-0000-1000-8000-00805f9b34fb");
+        assert(spp_service_uuid_text(cat[1]) == "00001101-0000-1000-8000-008584d01810");
+        assert(spp_service_uuid_text(cat[2]) == "00001101-0000-1000-8000-00805f9b34fb");
+        assert(cat[0].kind == ChannelKind::MiuiSppFd2d && cat[0].mode == AuthMode::Framed);
+        assert(cat[1].kind == ChannelKind::XiaoAiSpp && cat[1].mode == AuthMode::RawStream);
+        assert(cat[2].kind == ChannelKind::StandardSpp && cat[2].mode == AuthMode::RawStream);
+        std::printf("[PASS] SPP service catalog (FD2D / XiaoAi / standard + auth mode)\n");
+    }
+
     // 6. Optional live hardware smoke & regression test
     if (argc > 1 && std::string(argv[1]) == "--live") {
         auto devs = enumerate_paired_devices();
@@ -170,6 +186,11 @@ int main(int argc, char** argv) {
             nullptr, nullptr);
         int wsa = 0;
         bool ok = sess.connect_and_auth(target_mac, 6000, &wsa);
+        if (!ok) {
+            std::printf("[LIVE FAIL] connect_and_auth(MAC=%s) failed, WSA=%d\n", target_mac.c_str(), wsa);
+            std::printf("            10060=timeout 10064=host down -> earbud asleep/in case;\n"
+                        "            otherwise check that no other client holds the SPP channel\n");
+        }
         assert(ok && "Live connect_and_auth failed");
 
         auto orig = sess.snapshot();

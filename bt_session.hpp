@@ -60,6 +60,24 @@ bool is_xiaomi_manager_running();
 bool parse_mac_u64(const std::string& mac, uint64_t& out_addr);
 std::string format_mac_u64(uint64_t addr);
 
+// SPP service records probed in the official APK order. Data1..Data3 are the
+// canonical UUID fields (host order); data4 is the raw tail.
+struct SppServiceInfo {
+    ChannelKind kind;
+    AuthMode mode;
+    uint32_t data1;
+    uint16_t data2;
+    uint16_t data3;
+    std::array<uint8_t, 8> data4;
+    const char* label;
+};
+
+std::array<SppServiceInfo, 3> spp_service_catalog();
+
+// Renders a catalog entry back to its textual UUID (lower-case, 8-4-4-4-12),
+// so the constants can be asserted against the APK string literals.
+std::string spp_service_uuid_text(const SppServiceInfo& info);
+
 class BtSession {
 public:
     using LogCallback = std::function<void(const std::string&)>;

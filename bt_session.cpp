@@ -55,23 +55,19 @@ bool has_earphone_keyword(const std::string& name) {
 
 // Primary MIUI SPP (Airoha GATT-over-RFCOMM) service UUID:
 // 0000FD2D-0000-1000-8000-00805F9B34FB. Connecting here means auth-with-command.
-constexpr GUID kServiceFd2d = {
-    0x0000FD2D, 0x0000, 0x1000,
-    {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}
-};
-
 // XiaoAi SPP record: 00001101-0000-1000-8000-008584D01810 (APK UUID_SPP_XIAOAI).
 // Fallback channels keep auth-with-command = false, i.e. raw stream auth.
-constexpr GUID kServiceXiaoAiSpp = {
-    0x00001101, 0x0000, 0x1000,
-    {0x80, 0x00, 0x00, 0x85, 0x84, 0xD0, 0x18, 0x10}
-};
-
-// Fallback Standard SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
-constexpr GUID kServiceSpp = {
-    0x00001101, 0x0000, 0x1000,
-    {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}
-};
+// Standard SPP: 00001101-0000-1000-8000-00805F9B34FB
+// The authoritative copies live in spp_service_catalog(); these wrappers only
+// translate a catalog entry into the sockaddr_bth GUID layout.
+GUID guid_from_service(const SppServiceInfo& info) {
+    GUID g{};
+    g.Data1 = info.data1;
+    g.Data2 = info.data2;
+    g.Data3 = info.data3;
+    for (int i = 0; i < 8; ++i) g.Data4[i] = info.data4[static_cast<size_t>(i)];
+    return g;
+}
 
 void fill_random_16(uint8_t out[16]) {
     if (BCryptGenRandom(nullptr, out, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0) {
@@ -111,8 +107,36 @@ std::string format_mac_u64(uint64_t addr) {
     return buf;
 }
 
-std::vector<PairedBtDevice> enumerate_paired_devices() {
-    std::vector<PairedBtDevice> out;
+std::array<SppServiceInfo, 3> spp_service_catalog() {
+    return {{
+        {ChannelKind::MiuiSppFd2d, AuthMode::Framed,
+         0x0000FD2D, 0x0000, 0x1000,
+         {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB},
+         "FD2D (MIUI SPP)"},
+        {ChannelKind::XiaoAiSpp, AuthMode::RawStream,
+         0x00001101, 0x0000, 0x1000,
+         {0x80, 0x00, 0x00, 0x85, 0x84, 0xD0, 0x18, 0x10},
+         "1101 (XiaoAi SPP)"},
+        {ChannelKind::StandardSpp, AuthMode::RawStream,
+         0x00001101, 0x0000, 0x1000,
+         {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB},
+         "1101 (Standard SPP)"},
+    }};
+}
+
+std::string spp_service_uuid_text(const SppServiceInfo& info) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                  static_cast<unsigned>(info.data1),
+                  static_cast<unsigned>(info.data2),
+                  static_cast<unsigned>(info.data3),
+                  info.data4[0], info.data4[1],
+                  info.data4[2], info.data4[3], info.data4[4],
+                  info.data4[5], info.data4[6], info.data4[7]);
+    return buf;
+}
+
+std::vector<PairedBtDevice> enumerate_paired_devices() {    std::vector<PairedBtDevice> out;
     BLUETOOTH_DEVICE_SEARCH_PARAMS sp{};
     sp.dwSize = sizeof(sp);
     sp.fReturnAuthenticated = TRUE;
@@ -275,27 +299,18 @@ bool BtSession::connect_and_auth(const std::string& mac, int connect_timeout_ms,
     //   Standard SPP     -> raw stream auth
     // Trying only FD2D made Xiaomi-branded models fail: they expose no FD2D
     // service and fall back to a channel whose auth is unframed.
-    struct ChannelAttempt {
-        const GUID* uuid;
-        ChannelKind kind;
-        AuthMode mode;
-        const char* label;
-    };
-    static const ChannelAttempt kAttempts[] = {
-        {&kServiceFd2d, ChannelKind::MiuiSppFd2d, AuthMode::Framed, "FD2D (MIUI SPP)"},
-        {&kServiceXiaoAiSpp, ChannelKind::XiaoAiSpp, AuthMode::RawStream, "1101 (XiaoAi SPP)"},
-        {&kServiceSpp, ChannelKind::StandardSpp, AuthMode::RawStream, "1101 (Standard SPP)"},
-    };
+    const auto catalog = spp_service_catalog();
 
     SOCKET s = INVALID_SOCKET;
     int last_err = 0;
     channel_ = ChannelKind::Unknown;
     auth_mode_ = AuthMode::None;
 
-    for (const auto& attempt : kAttempts) {
+    for (const auto& attempt : catalog) {
         emit_log(">>> RFCOMM 连接 " + norm_mac + "  [" + attempt.label + "]");
         int err = 0;
-        SOCKET candidate = try_connect_uuid(*attempt.uuid, attempt.label, err);
+        GUID uuid = guid_from_service(attempt);
+        SOCKET candidate = try_connect_uuid(uuid, attempt.label, err);
         if (candidate != INVALID_SOCKET) {
             s = candidate;
             channel_ = attempt.kind;
