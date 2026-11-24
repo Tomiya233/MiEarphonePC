@@ -176,6 +176,19 @@ int main(int argc, char** argv) {
         std::printf("[LIVE SNAPSHOT] name=%s fw=%s vid=%04X pid=%04X sn=%s auth=%d\n",
                     orig.name.c_str(), orig.fw_version.c_str(), orig.vid, orig.pid,
                     orig.sn.c_str(), orig.authenticated);
+        std::printf("[LIVE TRANSPORT] channel=%s auth_mode=%s brand=%s model=%s\n",
+                    channel_kind_name(orig.channel), auth_mode_name(orig.auth_mode),
+                    orig.brand.c_str(), orig.model_name.c_str());
+        if (auto prof = sess.profile()) {
+            std::printf("[LIVE PROFILE] codename=%s market=%s brand=%s anc_gears=%u trans_gears=%u "
+                        "spatial=%d multipoint=%d\n",
+                        prof->codename, prof->market_name, prof->brand,
+                        prof->anc_gears, prof->trans_gears,
+                        prof->spatial ? 1 : 0, prof->multipoint ? 1 : 0);
+        } else if (orig.vid && orig.pid) {
+            std::printf("[LIVE PROFILE] VID:PID %04X:%04X not in the adaptation table\n",
+                        orig.vid, orig.pid);
+        }
         std::printf("[LIVE BATTERY] L=%d%%(chg=%d) R=%d%%(chg=%d) Box=%d%%(chg=%d) Overall=%d%%\n",
                     orig.battery.left.percent, orig.battery.left.charging,
                     orig.battery.right.percent, orig.battery.right.charging,
