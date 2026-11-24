@@ -89,6 +89,64 @@ int main(int argc, char** argv) {
     assert(sp_out.open && sp_out.preference == 1 && sp_out.head_tracking && !sp_out.virtual_surround);
     std::printf("[PASS] Spatial Audio & Scene Rendering codecs\n");
 
+    // 6. Raw-stream auth packet classifier (APK BluetoothAuth.k)
+    {
+        uint8_t body[16] = {0};
+        auto challenge = make_raw_auth_packet(0x00, body);
+        auto response = make_raw_auth_packet(0x01, body);
+        assert(challenge.size() == 17 && response.size() == 17);
+        assert(raw_auth_packet_len(challenge) == 17);
+        assert(raw_auth_packet_len(response) == 17);
+
+        std::vector<uint8_t> pass = {0x02, 'p', 'a', 's', 's'};
+        assert(raw_auth_packet_len(pass) == 5);
+
+        // A framed RCSP packet must never be mistaken for a raw one
+        auto framed = build_command(CMD_AUTH_CHECK, {0x01}, 1, APP_AUTH);
+        assert(raw_auth_packet_len(framed) == 0);
+
+        // Too short / unknown tag
+        std::vector<uint8_t> shorty = {0x00, 0x11, 0x22};
+        assert(raw_auth_packet_len(shorty) == 0);
+        std::vector<uint8_t> junk(20, 0x03);
+        assert(raw_auth_packet_len(junk) == 0);
+        std::printf("[PASS] Raw-stream auth packet classifier (17B / 5B / framed reject)\n");
+    }
+
+    // 7. Model table rebuilt from APK DeviceVidPidTypeUtilsKt (decimal -> hex)
+    {
+        auto n76 = find_device_profile(0x2717, 0x506C);   // 20588
+        assert(n76 && std::string(n76->codename) == "N76");
+        assert(std::string(n76->brand) == "Redmi");
+
+        auto o71 = find_device_profile(0x2717, 0x50AB);   // 20651
+        assert(o71 && std::string(o71->codename) == "O71");
+        assert(std::string(o71->brand) == "Xiaomi");
+
+        auto m75a = find_device_profile(0x2717, 0x5044);  // 20548
+        assert(m75a && std::string(m75a->brand) == "Xiaomi");
+
+        auto l76 = find_device_profile(0x5A4D, 0xEA0E);   // 59918
+        assert(l76 && std::string(l76->codename) == "L76");
+
+        auto k73 = find_device_profile(0x2717, 0x5025);   // 20517
+        assert(k73 && std::string(k73->brand) == "Xiaomi");
+
+        assert(!find_device_profile(0x2717, 0x0001).has_value());
+        assert(!find_device_profile(0, 0).has_value());
+        assert(std::string(vendor_display_name(0x2717)) == "Xiaomi");
+        std::printf("[PASS] Device profile table (Xiaomi/Redmi/ZMI VID:PID)\n");
+    }
+
+    // 8. Transport naming for logs / UI
+    {
+        assert(std::string(channel_kind_name(ChannelKind::MiuiSppFd2d)).find("FD2D") != std::string::npos);
+        assert(std::string(channel_kind_name(ChannelKind::XiaoAiSpp)).find("XiaoAi") != std::string::npos);
+        assert(std::string(auth_mode_name(AuthMode::Framed)) == "Framed RCSP");
+        assert(std::string(auth_mode_name(AuthMode::RawStream)) == "Raw stream");
+        std::printf("[PASS] Channel / auth-mode naming\n");
+    }
+
     // 6. Optional live hardware smoke & regression test
     if (argc > 1 && std::string(argv[1]) == "--live") {
         auto devs = enumerate_paired_devices();

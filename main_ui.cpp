@@ -1605,7 +1605,7 @@ private:
 
         // Hero Left: Device Info & Metadata Pills
         std::wstring title = s.connected ? utf8_to_wide(s.name.empty() ? s.mac : s.name) : L"尚未连接小米耳机";
-        draw_text(title, tf_h1_, D2D1::RectF(mainX + 22, heroTop + 14, batRightStart - 12, heroTop + 44), th.text_pri);
+        draw_text(title, tf_h1_, D2D1::RectF(mainX + 22, heroTop + 10, batRightStart - 12, heroTop + 38), th.text_pri);
 
         if (s.connected) {
             std::wstring meta = L"MAC " + utf8_to_wide(s.mac);
@@ -1615,23 +1615,52 @@ private:
                 std::snprintf(vpc, sizeof(vpc), "  ·  %04X:%04X", s.vid, s.pid);
                 meta += utf8_to_wide(vpc);
             }
-            draw_text(meta, tf_sub_, D2D1::RectF(mainX + 22, heroTop + 46, batRightStart - 12, heroTop + 67), th.text_mut);
+            draw_text(meta, tf_sub_, D2D1::RectF(mainX + 22, heroTop + 40, batRightStart - 12, heroTop + 58), th.text_mut);
+
+            // Model + transport channel: shows whether the earbud resolved to a
+            // known profile and which auth encoding the channel implies.
+            {
+                std::wstring model;
+                if (!s.model_name.empty()) {
+                    model = utf8_to_wide(s.model_name);
+                    if (!s.brand.empty()) model = utf8_to_wide(s.brand) + L" · " + model;
+                } else if (!s.brand.empty()) {
+                    model = utf8_to_wide(s.brand) + L" · 未收录型号";
+                }
+                std::wstring chan;
+                switch (s.channel) {
+                    case ChannelKind::MiuiSppFd2d: chan = L"FD2D"; break;
+                    case ChannelKind::XiaoAiSpp: chan = L"XiaoAi SPP"; break;
+                    case ChannelKind::StandardSpp: chan = L"标准 SPP"; break;
+                    default: break;
+                }
+                std::wstring line2 = model;
+                if (!chan.empty()) line2 += (line2.empty() ? L"" : L"  ·  ") + chan;
+                if (!s.sn.empty()) line2 += (line2.empty() ? L"" : L"  ·  ") + (L"SN " + utf8_to_wide(s.sn));
+                if (!line2.empty()) {
+                    draw_text(line2, tf_sub_,
+                              D2D1::RectF(mainX + 22, heroTop + 58, batRightStart - 12, heroTop + 76),
+                              th.text_mut);
+                }
+            }
 
             // Authentication Pill + Refresh Pill with spinning icon
-            D2D1_RECT_F authPill = D2D1::RectF(mainX + 22, heroTop + 73, mainX + 152, heroTop + 98);
+            D2D1_RECT_F authPill = D2D1::RectF(mainX + 22, heroTop + 78, mainX + 178, heroTop + 100);
             D2D1_COLOR_F ap_bg = s.authenticated ? rgb(0x10B981, th.dark_t > 0.5f ? 0.18f : 0.12f)
                                                  : rgb(0xF59E0B, th.dark_t > 0.5f ? 0.18f : 0.12f);
             fill_round(authPill, 7.0f, ap_bg);
             stroke_round(authPill, 7.0f, s.authenticated ? rgb(0x10B981, 0.45f) : rgb(0xF59E0B, 0.45f));
-            draw_text(s.authenticated ? L"🔐 RCSP 已认证" : L"⚠ 未完成认证", tf_sub_, authPill,
+            std::wstring pill;
+            if (s.authenticated) {
+                pill = (s.auth_mode == AuthMode::RawStream) ? L"🔐 裸流认证通过"
+                                                            : L"🔐 帧式认证通过";
+            } else {
+                pill = L"⚠ 未完成认证";
+            }
+            draw_text(pill, tf_sub_, authPill,
                       s.authenticated ? rgb(0x10B981) : rgb(0xF59E0B), DWRITE_TEXT_ALIGNMENT_CENTER);
 
-            if (!s.sn.empty()) {
-                draw_text(L"SN: " + utf8_to_wide(s.sn), tf_sub_,
-                          D2D1::RectF(mainX + 162, heroTop + 73, batRightStart - 12, heroTop + 98), th.text_mut);
-            }
-
-            D2D1_RECT_F refBtn = D2D1::RectF(mainX + 22, heroTop + 102, mainX + 136, heroTop + 123);
+            D2D1_RECT_F refBtn = D2D1::RectF(mainX + 22, heroTop + 102, mainX + 136, heroTop + 124);
             draw_button(refBtn, L"    刷新电量状态", HIT_REFRESH_STATE, th);
             draw_refresh_glyph(refBtn.left + 15.0f, (refBtn.top + refBtn.bottom) * 0.5f, 4.6f, refresh_spin_deg_, th.text_sec);
         } else {
