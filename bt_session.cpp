@@ -304,13 +304,10 @@ bool BtSession::connect_and_auth(const std::string& mac, int connect_timeout_ms,
             break;
         }
         last_err = err;
-        // 10049/10108 = service not registered on the peer; other errors mean the
-        // link itself is down, so stop retrying further service records.
-        if (err != 10049 && err != 10108) {
-            emit_log("    " + std::string(attempt.label) + " 连接失败 WSA=" + std::to_string(err));
-            break;
-        }
-        emit_log("    " + std::string(attempt.label) + " 未注册，尝试下一个通道...");
+        // The APK tries the next service record on ANY failure (including
+        // timeouts), so a slow SDP lookup on FD2D must not abort the walk.
+        emit_log("    " + std::string(attempt.label) + " 连接失败 WSA=" + std::to_string(err) +
+                 (err == 10049 || err == 10108 ? "（服务未注册）" : "") + "，尝试下一个通道...");
     }
 
     if (s == INVALID_SOCKET) {
